@@ -45,7 +45,7 @@ class UNet1DModel(ModelMixin, ConfigMixin):
 
     Parameters:
         sample_size (`int`, *optional*): Default length of sample. Should be adaptable at runtime.
-        in_channels (`int`, *optional*, defaults to 2): Number of channels in the input sample.
+        in_channels (`int`, *optional*, defaults to 18): Number of channels in the input sample.
         out_channels (`int`, *optional*, defaults to 2): Number of channels in the output.
         extra_in_channels (`int`, *optional*, defaults to 0):
             Number of additional channels to be added to the input of the first down block. Useful for cases where the
@@ -74,7 +74,7 @@ class UNet1DModel(ModelMixin, ConfigMixin):
         self,
         sample_size: int = 65536,
         sample_rate: Optional[int] = None,
-        in_channels: int = 2,
+        in_channels: int = 18,
         out_channels: int = 2,
         extra_in_channels: int = 0,
         time_embedding_type: str = "fourier",
