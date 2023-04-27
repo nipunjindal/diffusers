@@ -31,8 +31,8 @@ from diffusers import (
 from diffusers.utils import floats_tensor, load_image, load_numpy, slow, torch_device
 from diffusers.utils.testing_utils import require_torch_gpu
 
-from ...pipeline_params import TEXT_GUIDED_IMAGE_VARIATION_BATCH_PARAMS, TEXT_GUIDED_IMAGE_VARIATION_PARAMS
-from ...test_pipelines_common import PipelineTesterMixin
+from ..pipeline_params import TEXT_GUIDED_IMAGE_VARIATION_BATCH_PARAMS, TEXT_GUIDED_IMAGE_VARIATION_PARAMS
+from ..test_pipelines_common import PipelineTesterMixin
 
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -198,7 +198,7 @@ class StableDiffusionLatentUpscalePipelineIntegrationTests(unittest.TestCase):
         expected_image = load_numpy(
             "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/latent-upscaler/astronaut_1024.npy"
         )
-        assert np.abs((expected_image - image).max()) < 5e-1
+        assert np.abs((expected_image - image).mean()) < 5e-2
 
     def test_latent_upscaler_fp16_image(self):
         generator = torch.manual_seed(33)

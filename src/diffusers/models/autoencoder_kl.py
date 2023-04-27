@@ -65,6 +65,8 @@ class AutoencoderKL(ModelMixin, ConfigMixin):
             Synthesis with Latent Diffusion Models](https://arxiv.org/abs/2112.10752) paper.
     """
 
+    _supports_gradient_checkpointing = True
+
     @register_to_config
     def __init__(
         self,
@@ -118,8 +120,12 @@ class AutoencoderKL(ModelMixin, ConfigMixin):
             if isinstance(self.config.sample_size, (list, tuple))
             else self.config.sample_size
         )
-        self.tile_latent_min_size = int(sample_size / (2 ** (len(self.block_out_channels) - 1)))
+        self.tile_latent_min_size = int(sample_size / (2 ** (len(self.config.block_out_channels) - 1)))
         self.tile_overlap_factor = 0.25
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, (Encoder, Decoder)):
+            module.gradient_checkpointing = value
 
     def enable_tiling(self, use_tiling: bool = True):
         r"""
@@ -190,17 +196,18 @@ class AutoencoderKL(ModelMixin, ConfigMixin):
         return DecoderOutput(sample=decoded)
 
     def blend_v(self, a, b, blend_extent):
-        for y in range(blend_extent):
+        for y in range(min(a.shape[2], b.shape[2], blend_extent)):
             b[:, :, y, :] = a[:, :, -blend_extent + y, :] * (1 - y / blend_extent) + b[:, :, y, :] * (y / blend_extent)
         return b
 
     def blend_h(self, a, b, blend_extent):
-        for x in range(blend_extent):
+        for x in range(min(a.shape[3], b.shape[3], blend_extent)):
             b[:, :, :, x] = a[:, :, :, -blend_extent + x] * (1 - x / blend_extent) + b[:, :, :, x] * (x / blend_extent)
         return b
 
     def tiled_encode(self, x: torch.FloatTensor, return_dict: bool = True) -> AutoencoderKLOutput:
         r"""Encode a batch of images using a tiled encoder.
+
         Args:
         When this option is enabled, the VAE will split the input tensor into tiles to compute encoding in several
         steps. This is useful to keep memory use constant regardless of image size. The end result of tiled encoding is:
@@ -247,6 +254,7 @@ class AutoencoderKL(ModelMixin, ConfigMixin):
 
     def tiled_decode(self, z: torch.FloatTensor, return_dict: bool = True) -> Union[DecoderOutput, torch.FloatTensor]:
         r"""Decode a batch of images using a tiled decoder.
+
         Args:
         When this option is enabled, the VAE will split the input tensor into tiles to compute decoding in several
         steps. This is useful to keep memory use constant regardless of image size. The end result of tiled decoding is:

@@ -20,7 +20,6 @@ import os
 import random
 import warnings
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import PIL
@@ -31,7 +30,7 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from huggingface_hub import HfFolder, Repository, create_repo, whoami
+from huggingface_hub import create_repo, upload_folder
 
 # TODO: remove and import from diffusers.utils when the new version of diffusers is released
 from packaging import version
@@ -78,9 +77,37 @@ else:
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.15.0.dev0")
+check_min_version("0.17.0.dev0")
 
 logger = get_logger(__name__)
+
+
+def save_model_card(repo_id: str, images=None, base_model=str, repo_folder=None):
+    img_str = ""
+    for i, image in enumerate(images):
+        image.save(os.path.join(repo_folder, f"image_{i}.png"))
+        img_str += f"![img_{i}](./image_{i}.png)\n"
+
+    yaml = f"""
+---
+license: creativeml-openrail-m
+base_model: {base_model}
+tags:
+- stable-diffusion
+- stable-diffusion-diffusers
+- text-to-image
+- diffusers
+- textual_inversion
+inference: true
+---
+    """
+    model_card = f"""
+# Textual inversion text2image fine-tuning - {repo_id}
+These are textual inversion adaption weights for {base_model}. You can find some example images in the following. \n
+{img_str}
+"""
+    with open(os.path.join(repo_folder, "README.md"), "w") as f:
+        f.write(yaml + model_card)
 
 
 def log_validation(text_encoder, tokenizer, unet, vae, args, accelerator, weight_dtype, epoch):
@@ -95,6 +122,7 @@ def log_validation(text_encoder, tokenizer, unet, vae, args, accelerator, weight
         tokenizer=tokenizer,
         unet=unet,
         vae=vae,
+        safety_checker=None,
         revision=args.revision,
         torch_dtype=weight_dtype,
     )
@@ -125,11 +153,16 @@ def log_validation(text_encoder, tokenizer, unet, vae, args, accelerator, weight
 
     del pipeline
     torch.cuda.empty_cache()
+    return images
 
 
-def save_progress(text_encoder, placeholder_token_id, accelerator, args, save_path):
+def save_progress(text_encoder, placeholder_token_ids, accelerator, args, save_path):
     logger.info("Saving embeddings")
-    learned_embeds = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[placeholder_token_id]
+    learned_embeds = (
+        accelerator.unwrap_model(text_encoder)
+        .get_input_embeddings()
+        .weight[min(placeholder_token_ids) : max(placeholder_token_ids) + 1]
+    )
     learned_embeds_dict = {args.placeholder_token: learned_embeds.detach().cpu()}
     torch.save(learned_embeds_dict, save_path)
 
@@ -145,8 +178,14 @@ def parse_args():
     parser.add_argument(
         "--only_save_embeds",
         action="store_true",
-        default=False,
+        default=True,
         help="Save only the embeddings for the new concept.",
+    )
+    parser.add_argument(
+        "--num_vectors",
+        type=int,
+        default=1,
+        help="How many textual inversion vectors shall be used to learn the concept.",
     )
     parser.add_argument(
         "--pretrained_model_name_or_path",
@@ -519,16 +558,6 @@ class TextualInversionDataset(Dataset):
         return example
 
 
-def get_full_repo_name(model_id: str, organization: Optional[str] = None, token: Optional[str] = None):
-    if token is None:
-        token = HfFolder.get_token()
-    if organization is None:
-        username = whoami(token)["name"]
-        return f"{username}/{model_id}"
-    else:
-        return f"{organization}/{model_id}"
-
-
 def main():
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
@@ -567,21 +596,13 @@ def main():
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            create_repo(repo_name, exist_ok=True, token=args.hub_token)
-            repo = Repository(args.output_dir, clone_from=repo_name, token=args.hub_token)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
+        if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
+
+        if args.push_to_hub:
+            repo_id = create_repo(
+                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
+            ).repo_id
 
     # Load tokenizer
     if args.tokenizer_name:
@@ -600,8 +621,19 @@ def main():
     )
 
     # Add the placeholder token in tokenizer
-    num_added_tokens = tokenizer.add_tokens(args.placeholder_token)
-    if num_added_tokens == 0:
+    placeholder_tokens = [args.placeholder_token]
+
+    if args.num_vectors < 1:
+        raise ValueError(f"--num_vectors has to be larger or equal to 1, but is {args.num_vectors}")
+
+    # add dummy tokens for multi-vector
+    additional_tokens = []
+    for i in range(1, args.num_vectors):
+        additional_tokens.append(f"{args.placeholder_token}_{i}")
+    placeholder_tokens += additional_tokens
+
+    num_added_tokens = tokenizer.add_tokens(placeholder_tokens)
+    if num_added_tokens != args.num_vectors:
         raise ValueError(
             f"The tokenizer already contains the token {args.placeholder_token}. Please pass a different"
             " `placeholder_token` that is not already in the tokenizer."
@@ -614,14 +646,16 @@ def main():
         raise ValueError("The initializer token must be a single token.")
 
     initializer_token_id = token_ids[0]
-    placeholder_token_id = tokenizer.convert_tokens_to_ids(args.placeholder_token)
+    placeholder_token_ids = tokenizer.convert_tokens_to_ids(placeholder_tokens)
 
     # Resize the token embeddings as we are adding new special tokens to the tokenizer
     text_encoder.resize_token_embeddings(len(tokenizer))
 
     # Initialise the newly added placeholder token with the embeddings of the initializer token
     token_embeds = text_encoder.get_input_embeddings().weight.data
-    token_embeds[placeholder_token_id] = token_embeds[initializer_token_id]
+    with torch.no_grad():
+        for token_id in placeholder_token_ids:
+            token_embeds[token_id] = token_embeds[initializer_token_id].clone()
 
     # Freeze vae and unet
     vae.requires_grad_(False)
@@ -829,7 +863,9 @@ def main():
                 optimizer.zero_grad()
 
                 # Let's make sure we don't update any embedding weights besides the newly added token
-                index_no_updates = torch.arange(len(tokenizer)) != placeholder_token_id
+                index_no_updates = torch.ones((len(tokenizer),), dtype=torch.bool)
+                index_no_updates[min(placeholder_token_ids) : max(placeholder_token_ids) + 1] = False
+
                 with torch.no_grad():
                     accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[
                         index_no_updates
@@ -837,19 +873,23 @@ def main():
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
+                images = []
                 progress_bar.update(1)
                 global_step += 1
                 if global_step % args.save_steps == 0:
                     save_path = os.path.join(args.output_dir, f"learned_embeds-steps-{global_step}.bin")
-                    save_progress(text_encoder, placeholder_token_id, accelerator, args, save_path)
+                    save_progress(text_encoder, placeholder_token_ids, accelerator, args, save_path)
 
-                if global_step % args.checkpointing_steps == 0:
-                    if accelerator.is_main_process:
+                if accelerator.is_main_process:
+                    if global_step % args.checkpointing_steps == 0:
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
-                if args.validation_prompt is not None and global_step % args.validation_steps == 0:
-                    log_validation(text_encoder, tokenizer, unet, vae, args, accelerator, weight_dtype, epoch)
+
+                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                        images = log_validation(
+                            text_encoder, tokenizer, unet, vae, args, accelerator, weight_dtype, epoch
+                        )
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -857,7 +897,7 @@ def main():
 
             if global_step >= args.max_train_steps:
                 break
-    # Create the pipeline using using the trained modules and save it.
+    # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         if args.push_to_hub and args.only_save_embeds:
@@ -876,10 +916,21 @@ def main():
             pipeline.save_pretrained(args.output_dir)
         # Save the newly trained embeddings
         save_path = os.path.join(args.output_dir, "learned_embeds.bin")
-        save_progress(text_encoder, placeholder_token_id, accelerator, args, save_path)
+        save_progress(text_encoder, placeholder_token_ids, accelerator, args, save_path)
 
         if args.push_to_hub:
-            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
+            save_model_card(
+                repo_id,
+                images=images,
+                base_model=args.pretrained_model_name_or_path,
+                repo_folder=args.output_dir,
+            )
+            upload_folder(
+                repo_id=repo_id,
+                folder_path=args.output_dir,
+                commit_message="End of training",
+                ignore_patterns=["step_*", "epoch_*"],
+            )
 
     accelerator.end_training()
 

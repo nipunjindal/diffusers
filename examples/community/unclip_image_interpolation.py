@@ -5,7 +5,7 @@ import PIL
 import torch
 from torch.nn import functional as F
 from transformers import (
-    CLIPFeatureExtractor,
+    CLIPImageProcessor,
     CLIPTextModelWithProjection,
     CLIPTokenizer,
     CLIPVisionModelWithProjection,
@@ -50,7 +50,7 @@ class UnCLIPImageInterpolationPipeline(DiffusionPipeline):
         tokenizer (`CLIPTokenizer`):
             Tokenizer of class
             [CLIPTokenizer](https://huggingface.co/docs/transformers/v4.21.0/en/model_doc/clip#transformers.CLIPTokenizer).
-        feature_extractor ([`CLIPFeatureExtractor`]):
+        feature_extractor ([`CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `image_encoder`.
         image_encoder ([`CLIPVisionModelWithProjection`]):
             Frozen CLIP image-encoder. unCLIP Image Variation uses the vision portion of
@@ -75,7 +75,7 @@ class UnCLIPImageInterpolationPipeline(DiffusionPipeline):
     text_proj: UnCLIPTextProjModel
     text_encoder: CLIPTextModelWithProjection
     tokenizer: CLIPTokenizer
-    feature_extractor: CLIPFeatureExtractor
+    feature_extractor: CLIPImageProcessor
     image_encoder: CLIPVisionModelWithProjection
     super_res_first: UNet2DModel
     super_res_last: UNet2DModel
@@ -90,7 +90,7 @@ class UnCLIPImageInterpolationPipeline(DiffusionPipeline):
         text_encoder: CLIPTextModelWithProjection,
         tokenizer: CLIPTokenizer,
         text_proj: UnCLIPTextProjModel,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
         image_encoder: CLIPVisionModelWithProjection,
         super_res_first: UNet2DModel,
         super_res_last: UNet2DModel,
@@ -270,7 +270,7 @@ class UnCLIPImageInterpolationPipeline(DiffusionPipeline):
                 The images to use for the image interpolation. Only accepts a list of two PIL Images or If you provide a tensor, it needs to comply with the
                 configuration of
                 [this](https://huggingface.co/fusing/karlo-image-variations-diffusers/blob/main/feature_extractor/preprocessor_config.json)
-                `CLIPFeatureExtractor` while still having a shape of two in the 0th dimension. Can be left to `None` only when `image_embeddings` are passed.
+                `CLIPImageProcessor` while still having a shape of two in the 0th dimension. Can be left to `None` only when `image_embeddings` are passed.
             steps (`int`, *optional*, defaults to 5):
                 The number of interpolation images to generate.
             decoder_num_inference_steps (`int`, *optional*, defaults to 25):
@@ -372,9 +372,9 @@ class UnCLIPImageInterpolationPipeline(DiffusionPipeline):
         self.decoder_scheduler.set_timesteps(decoder_num_inference_steps, device=device)
         decoder_timesteps_tensor = self.decoder_scheduler.timesteps
 
-        num_channels_latents = self.decoder.in_channels
-        height = self.decoder.sample_size
-        width = self.decoder.sample_size
+        num_channels_latents = self.decoder.config.in_channels
+        height = self.decoder.config.sample_size
+        width = self.decoder.config.sample_size
 
         decoder_latents = self.prepare_latents(
             (batch_size, num_channels_latents, height, width),
@@ -425,9 +425,9 @@ class UnCLIPImageInterpolationPipeline(DiffusionPipeline):
         self.super_res_scheduler.set_timesteps(super_res_num_inference_steps, device=device)
         super_res_timesteps_tensor = self.super_res_scheduler.timesteps
 
-        channels = self.super_res_first.in_channels // 2
-        height = self.super_res_first.sample_size
-        width = self.super_res_first.sample_size
+        channels = self.super_res_first.config.in_channels // 2
+        height = self.super_res_first.config.sample_size
+        width = self.super_res_first.config.sample_size
 
         super_res_latents = self.prepare_latents(
             (batch_size, channels, height, width),
